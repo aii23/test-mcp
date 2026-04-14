@@ -1,26 +1,20 @@
 {
-  "name": "nest-mcp-server",
+  "name": "rep-mcp-server",
   "version": "1.0.0",
-  "description": "NestJS MCP server with EVM reputation tools",
+  "type": "module",
+  "description": "MCP server with EVM reputation tools",
   "scripts": {
-    "build": "nest build",
-    "start": "node dist/main",
-    "start:dev": "nest start --watch",
-    "start:debug": "nest start --debug --watch",
-    "lint": "eslint src --ext .ts"
+    "build": "tsc",
+    "start": "node dist/main.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.10.2",
-    "@nestjs/common": "^10.4.15",
-    "@nestjs/core": "^10.4.15",
-    "@nestjs/platform-express": "^10.4.15",
-    "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
-    "@nestjs/cli": "^10.4.9",
-    "@nestjs/schematics": "^10.2.3",
+    "@types/cors": "^2.8.17",
     "@types/express": "^5.0.1",
     "@types/node": "^22.14.1",
     "typescript": "^5.8.3"
