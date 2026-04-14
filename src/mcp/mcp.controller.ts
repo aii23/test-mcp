@@ -12,15 +12,26 @@ export class McpController {
   /**
    * Single endpoint that handles all MCP traffic:
    *  POST /mcp  — JSON-RPC request/response
-   *  GET  /mcp  — SSE stream for server-initiated messages
-   *  DELETE /mcp — session teardown
+   *  GET  /mcp  — rejected (stateless mode, no SSE)
+   *  DELETE /mcp — rejected (stateless mode, no sessions)
    */
   @All()
   async handle(@Req() req: Request, @Res() res: Response): Promise<void> {
     this.logger.debug(`${req.method} /mcp`);
 
-    // Stateless transport: each HTTP call gets its own transport instance.
-    // No persistent session state is kept between requests.
+    // Stateless mode: only POST is valid. GET (SSE) and DELETE (session
+    // teardown) are not supported — return 405 so MCP clients fall back
+    // to POST-only communication immediately instead of hanging.
+    if (req.method !== 'POST') {
+      res.setHeader('Allow', 'POST');
+      res.status(405).json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Method not allowed.' },
+        id: null,
+      });
+      return;
+    }
+
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
@@ -30,7 +41,6 @@ export class McpController {
     });
 
     try {
-      // Fresh server instance per request — required for stateless StreamableHTTP
       const server = this.mcpService.createServer();
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
