@@ -11,8 +11,9 @@ async function bootstrap() {
     logger: ['log', 'warn', 'error', 'debug'],
   });
 
-  // Allow all origins so MCP clients running locally can reach the server
-  app.enableCors();
+  app.enableCors({
+    exposedHeaders: ['mcp-session-id'],
+  });
 
   await app.listen(PORT);
   logger.log(`MCP server running on http://localhost:${PORT}/mcp`);
