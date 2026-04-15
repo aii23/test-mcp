@@ -3,6 +3,7 @@ import cors from 'cors';
 import { randomUUID } from 'crypto';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { registerTools } from './tools.js';
 
@@ -12,51 +13,50 @@ const app = express();
 app.use(express.json());
 app.use(cors({ exposedHeaders: ['mcp-session-id'] }));
 
-const transports: Record<string, StreamableHTTPServerTransport> = {};
-
 function createServer(): McpServer {
   const server = new McpServer({ name: 'rep-mcp-server', version: '1.0.0' });
   registerTools(server);
   return server;
 }
 
+// ─── Streamable HTTP transport (modern) ─────────────────────────
+const httpTransports: Record<string, StreamableHTTPServerTransport> = {};
+
 app.all('/mcp', async (req, res) => {
   const sessionId = req.headers['mcp-session-id'] as string | undefined;
-  console.log(`[${req.method}] session=${sessionId ?? '(none)'}  body.method=${req.body?.method ?? '-'}`);
+  console.log(`[${req.method}] /mcp  session=${sessionId ?? '(none)'}  body.method=${req.body?.method ?? '-'}`);
 
-  // --- POST ---
   if (req.method === 'POST') {
-    // Existing session
-    if (sessionId && transports[sessionId]) {
-      console.log(`  -> reusing session ${sessionId}`);
-      await transports[sessionId].handleRequest(req, res, req.body);
+    // Legacy SSE messages arrive with ?sessionId= query param
+    const querySid = req.query.sessionId as string | undefined;
+    if (querySid && sseTransports[querySid]) {
+      console.log(`  [sse] handling message for SSE session ${querySid}`);
+      await sseTransports[querySid].handlePostMessage(req, res, req.body);
       return;
     }
 
-    // New session — only for initialize
+    if (sessionId && httpTransports[sessionId]) {
+      await httpTransports[sessionId].handleRequest(req, res, req.body);
+      return;
+    }
     if (!sessionId && isInitializeRequest(req.body)) {
-      console.log(`  -> creating new session`);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => {
-          transports[id] = transport;
-          console.log(`  -> session stored: ${id}`);
+          httpTransports[id] = transport;
+          console.log(`  [streamable] session stored: ${id}`);
         },
         enableJsonResponse: true,
       });
-
       transport.onclose = () => {
         const id = transport.sessionId;
-        if (id) delete transports[id];
+        if (id) delete httpTransports[id];
       };
-
       const server = createServer();
       await server.connect(transport);
       await transport.handleRequest(req, res, req.body);
       return;
     }
-
-    console.log(`  -> rejected: no session match, not initialize`);
     res.status(400).json({
       jsonrpc: '2.0',
       error: { code: -32000, message: 'Bad request: no valid session or not an initialize request' },
@@ -65,28 +65,28 @@ app.all('/mcp', async (req, res) => {
     return;
   }
 
-  // --- GET (SSE) ---
   if (req.method === 'GET') {
-    if (sessionId && transports[sessionId]) {
-      console.log(`  -> opening SSE for session ${sessionId}`);
-      await transports[sessionId].handleRequest(req, res);
+    if (sessionId && httpTransports[sessionId]) {
+      await httpTransports[sessionId].handleRequest(req, res);
       return;
     }
-    console.log(`  -> GET rejected: no session`);
-    res.status(400).json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Invalid or missing session ID.' },
-      id: null,
-    });
+    // No session ID → treat as legacy SSE connection attempt
+    console.log(`  [sse fallback] opening legacy SSE on /mcp`);
+    const sseTransport = new SSEServerTransport('/mcp', res);
+    const sseServer = createServer();
+    await sseServer.connect(sseTransport);
+    sseTransports[sseTransport.sessionId] = sseTransport;
+    console.log(`  [sse fallback] session: ${sseTransport.sessionId}`);
+    sseTransport.onclose = () => {
+      delete sseTransports[sseTransport.sessionId];
+    };
     return;
   }
 
-  // --- DELETE ---
   if (req.method === 'DELETE') {
-    if (sessionId && transports[sessionId]) {
-      console.log(`  -> deleting session ${sessionId}`);
-      await transports[sessionId].handleRequest(req, res);
-      delete transports[sessionId];
+    if (sessionId && httpTransports[sessionId]) {
+      await httpTransports[sessionId].handleRequest(req, res);
+      delete httpTransports[sessionId];
       return;
     }
     res.status(400).json({
@@ -100,7 +100,40 @@ app.all('/mcp', async (req, res) => {
   res.status(405).end('Method Not Allowed');
 });
 
+// ─── Legacy SSE transport (fallback for clients that don't support Streamable HTTP) ───
+const sseTransports: Record<string, SSEServerTransport> = {};
+
+app.get('/sse', async (_req, res) => {
+  console.log(`[GET] /sse  -> new legacy SSE connection`);
+  const transport = new SSEServerTransport('/messages', res);
+  const server = createServer();
+  await server.connect(transport);
+
+  sseTransports[transport.sessionId] = transport;
+  console.log(`  [sse] session: ${transport.sessionId}`);
+
+  transport.onclose = () => {
+    delete sseTransports[transport.sessionId];
+    console.log(`  [sse] closed: ${transport.sessionId}`);
+  };
+});
+
+app.post('/messages', async (req, res) => {
+  const sessionId = req.query.sessionId as string;
+  console.log(`[POST] /messages  session=${sessionId}  body.method=${req.body?.method ?? '-'}`);
+
+  const transport = sseTransports[sessionId];
+  if (!transport) {
+    res.status(400).json({ error: 'Unknown SSE session' });
+    return;
+  }
+  await transport.handlePostMessage(req, res, req.body);
+});
+
+// ─── Start ──────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`MCP server running on http://localhost:${PORT}/mcp`);
-  console.log('Tools: connect, get_evm_rep');
+  console.log(`MCP server running on http://localhost:${PORT}`);
+  console.log('  Streamable HTTP: POST/GET/DELETE /mcp');
+  console.log('  Legacy SSE:      GET /sse + POST /messages');
+  console.log('  Tools: connect, get_evm_rep');
 });
